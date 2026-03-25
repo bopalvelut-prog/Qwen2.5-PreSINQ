@@ -18,7 +18,7 @@ os.environ["OPENBLAS_NUM_THREADS"] = "2"
 import torch
 from tqdm import tqdm
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "SINQ"))
 from sinq.sinkhorn import sinkhorn_log
 
 
