@@ -2,6 +2,7 @@
 CPU-compatible Pre-SINQ for Qwen2.5 models.
 Based on huawei-csl/SINQ but modified to run without CUDA.
 """
+
 import os
 import sys
 import argparse
@@ -19,9 +20,9 @@ from sinq.sinkhorn import sinkhorn_log
 
 def find_block(H, W, block):
     for i in range(W):
-        if (W % (block + i) == 0):
+        if W % (block + i) == 0:
             return block + i
-        elif (W % (block - i) == 0):
+        elif W % (block - i) == 0:
             return block - i
     return block
 
@@ -38,7 +39,7 @@ def get_sink_scale(matrix_list, cat_dim=0, block=64, n_iter=4):
     else:
         if Wid % block != 0:
             block = find_block(H, Wid, block)
-        assert Wid % block == 0, 'block must divide W'
+        assert Wid % block == 0, "block must divide W"
         n_w = Wid // block
         W = W.view(H, Wid // block, block)
         W_batched = W.permute(1, 0, 2).contiguous().view(n_w, H, block)
@@ -46,7 +47,7 @@ def get_sink_scale(matrix_list, cat_dim=0, block=64, n_iter=4):
         def process_block(mat):
             return sinkhorn_log(mat, n_iter)
 
-        W_hat, mu1, mu2 = torch.vmap(process_block, randomness='different')(W_batched)
+        W_hat, mu1, mu2 = torch.vmap(process_block, randomness="different")(W_batched)
 
     mu1 = mu1 / mu1.median()
     return mu1.view(-1).to(dtype)
@@ -93,10 +94,13 @@ def pre_sinq_qwen(model, n_repeat=3, group_size=64, n_iter=4):
 
             # 1. Attention QKV normalization
             t_qkv = get_sink_scale(
-                [layer.self_attn.q_proj.weight.data,
-                 layer.self_attn.k_proj.weight.data,
-                 layer.self_attn.v_proj.weight.data],
-                block=group_size, n_iter=n_iter
+                [
+                    layer.self_attn.q_proj.weight.data,
+                    layer.self_attn.k_proj.weight.data,
+                    layer.self_attn.v_proj.weight.data,
+                ],
+                block=group_size,
+                n_iter=n_iter,
             )
             # Absorb into input_layernorm
             layer.input_layernorm.weight.data = (
@@ -116,7 +120,8 @@ def pre_sinq_qwen(model, n_repeat=3, group_size=64, n_iter=4):
             # 2. MLP gate+up normalization
             t_gu = get_sink_scale(
                 [layer.mlp.gate_proj.weight.data, layer.mlp.up_proj.weight.data],
-                block=group_size, n_iter=n_iter
+                block=group_size,
+                n_iter=n_iter,
             )
             # Absorb into post_attention_layernorm
             layer.post_attention_layernorm.weight.data = (
@@ -132,37 +137,37 @@ def pre_sinq_qwen(model, n_repeat=3, group_size=64, n_iter=4):
 
             # 3. MLP down normalization
             t_d = get_sink_scale(
-                [layer.mlp.down_proj.weight.data],
-                block=group_size, n_iter=n_iter
+                [layer.mlp.down_proj.weight.data], block=group_size, n_iter=n_iter
             )
             # Scale down down_proj, scale up up_proj
             layer.mlp.down_proj.weight.data = torch.matmul(
                 layer.mlp.down_proj.weight.data, torch.diag(1 / t_d)
             ).to(dev)
             layer.mlp.up_proj.weight.data = torch.matmul(
-                torch.diag(t_d),
-                layer.mlp.up_proj.weight.data
+                torch.diag(t_d), layer.mlp.up_proj.weight.data
             ).to(dev)
 
             # 4. Optional: Attention output projection normalization
             # This handles GQA (grouped query attention) for Qwen models
-            n_group = layer.self_attn.v_proj.weight.shape[0] // layer.self_attn.o_proj.weight.shape[0]
+            n_group = (
+                layer.self_attn.v_proj.weight.shape[0]
+                // layer.self_attn.o_proj.weight.shape[0]
+            )
             if n_group > 0:
                 oOut, oIn = layer.self_attn.o_proj.weight.shape
                 t_o = get_sink_scale(
                     [layer.self_attn.o_proj.weight.data.reshape(n_group * oOut, -1)],
-                    block=group_size, n_iter=n_iter
+                    block=group_size,
+                    n_iter=n_iter,
                 )
                 # Scale v_proj
                 layer.self_attn.v_proj.weight.data = torch.matmul(
-                    torch.diag(t_o),
-                    layer.self_attn.v_proj.weight.data
+                    torch.diag(t_o), layer.self_attn.v_proj.weight.data
                 ).to(dev)
                 # Scale o_proj
                 t_o_cat = torch.cat([t_o] * n_group)
                 layer.self_attn.o_proj.weight.data = torch.matmul(
-                    layer.self_attn.o_proj.weight.data,
-                    torch.diag(1 / t_o_cat)
+                    layer.self_attn.o_proj.weight.data, torch.diag(1 / t_o_cat)
                 ).to(dev)
 
     return model
@@ -181,7 +186,9 @@ def main():
     device = "cpu"
     print(f"Using device: {device}")
     print(f"Model: {args.model_name}")
-    print(f"Pre-SINQ config: group_size={args.group_size}, n_iter={args.n_iter}, n_repeat={args.n_repeat}")
+    print(
+        f"Pre-SINQ config: group_size={args.group_size}, n_iter={args.n_iter}, n_repeat={args.n_repeat}"
+    )
 
     # Load model
     print("\nLoading model...")
@@ -199,23 +206,23 @@ def main():
     # Apply Pre-SINQ
     print("\nApplying Pre-SINQ...")
     model = pre_sinq_qwen(
-        model,
-        n_repeat=args.n_repeat,
-        group_size=args.group_size,
-        n_iter=args.n_iter
+        model, n_repeat=args.n_repeat, group_size=args.group_size, n_iter=args.n_iter
     )
 
-    # Save the Pre-SINQ model
-    print(f"\nSaving Pre-SINQ model to {args.output_dir}...")
+    # Save the Pre-SINQ model in float16 to save RAM
+    print(f"\nSaving Pre-SINQ model to {args.output_dir} (float16)...")
+    gc.collect()
     os.makedirs(args.output_dir, exist_ok=True)
-    model.save_pretrained(args.output_dir)
+    model = model.to(dtype=torch.float16)
+    gc.collect()
+    model.save_pretrained(args.output_dir, max_shard_size="500MB")
     tokenizer.save_pretrained(args.output_dir)
-    print(f"✓ Pre-SINQ model saved to {args.output_dir}")
+    print(f"Pre-SINQ model saved to {args.output_dir}")
 
     if not args.skip_gguf:
-        print("\n" + "="*60)
+        print("\n" + "=" * 60)
         print("GGUF Conversion Instructions")
-        print("="*60)
+        print("=" * 60)
         print(f"""
 To convert to GGUF, use llama.cpp:
 
